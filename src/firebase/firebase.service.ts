@@ -27,7 +27,9 @@ export class FirebaseService {
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 
     if (!projectId || !clientEmail || !privateKey) {
-      throw new Error('Firebase Admin environment variables are not configured.');
+      throw new Error(
+        'Firebase Admin environment variables are not configured.',
+      );
     }
 
     return initializeApp({

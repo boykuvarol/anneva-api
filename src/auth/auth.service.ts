@@ -1,20 +1,25 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, type User } from '@prisma/client';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { PrismaService } from '../prisma/prisma.service';
+
+type UnknownRecord = Record<string, unknown>;
 
 @Injectable()
 export class AuthService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async syncUser(decodedToken: DecodedIdToken) {
+  async syncUser(decodedToken: DecodedIdToken): Promise<User> {
     const { uid, email } = decodedToken;
 
     const rawName: unknown = decodedToken.name;
+    const signInProvider = this.getSignInProvider(decodedToken.firebase);
+    const emailVerified = decodedToken.email_verified === true;
 
     const name =
       typeof rawName === 'string' && rawName.trim().length > 0
@@ -26,6 +31,10 @@ export class AuthService {
 
     if (!email) {
       throw new UnauthorizedException('Firebase token is missing an email.');
+    }
+
+    if (signInProvider === 'password' && !emailVerified) {
+      throw new ForbiddenException('E-posta adresini doğrulaman gerekiyor.');
     }
 
     const userByFirebaseUid = await this.prisma.user.findUnique({
@@ -90,5 +99,19 @@ export class AuthService {
 
       throw error;
     }
+  }
+
+  private getSignInProvider(firebaseClaim: unknown): string | undefined {
+    if (!this.isRecord(firebaseClaim)) {
+      return undefined;
+    }
+
+    const signInProvider = firebaseClaim.sign_in_provider;
+
+    return typeof signInProvider === 'string' ? signInProvider : undefined;
+  }
+
+  private isRecord(value: unknown): value is UnknownRecord {
+    return typeof value === 'object' && value !== null;
   }
 }
