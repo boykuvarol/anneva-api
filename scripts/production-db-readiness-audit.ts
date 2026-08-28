@@ -1,4 +1,4 @@
-import { Prisma, PrismaClient } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 const expectedMigrations = [
@@ -69,11 +69,21 @@ type UniqueIndexInfo = {
   is_primary: boolean;
 };
 
+type PrimaryKeyColumnRow = {
+  column_name: string;
+  ordinal: number;
+};
+
+type UniqueIndexColumnRow = {
+  index_name: string;
+  column_name: string;
+  ordinal: number;
+  is_primary: boolean;
+};
+
 type MigrationInfo = {
   migration_name: string;
-  finished_at: Date | null;
-  rolled_back_at: Date | null;
-  applied_steps_count: number;
+  status: 'APPLIED' | 'ROLLED_BACK' | 'PENDING_OR_FAILED';
 };
 
 type AuditResult = {
@@ -96,7 +106,10 @@ type AuditResult = {
   };
   migrationHistory: {
     tableExists: boolean;
-    expected: Record<string, 'APPLIED' | 'ROLLED_BACK' | 'NOT_RECORDED'>;
+    expected: Record<
+      string,
+      'APPLIED' | 'ROLLED_BACK' | 'PENDING_OR_FAILED' | 'NOT_RECORDED'
+    >;
     recordedMigrations: Array<{
       migrationName: string;
       status: 'APPLIED' | 'ROLLED_BACK' | 'PENDING_OR_FAILED';
@@ -161,15 +174,7 @@ function indexHasColumn(indexes: UniqueIndexInfo[], column: string): boolean {
 function getMigrationStatus(
   migration: MigrationInfo,
 ): 'APPLIED' | 'ROLLED_BACK' | 'PENDING_OR_FAILED' {
-  if (migration.rolled_back_at) {
-    return 'ROLLED_BACK';
-  }
-
-  if (migration.finished_at) {
-    return 'APPLIED';
-  }
-
-  return 'PENDING_OR_FAILED';
+  return migration.status;
 }
 
 function compareUserSchema(result: AuditResult): void {
@@ -360,27 +365,29 @@ async function runAudit(): Promise<void> {
     await prisma.$executeRaw`SET TRANSACTION READ ONLY`;
 
     const userTable = await prisma.$queryRaw<Array<{ exists: boolean }>>`
-      SELECT to_regclass('public."User"') IS NOT NULL AS exists
+      SELECT (to_regclass('public."User"') IS NOT NULL)::boolean AS exists
     `;
     result.userTableExists = userTable[0]?.exists === true;
 
     if (result.userTableExists) {
       result.userColumns = await prisma.$queryRaw<ColumnInfo[]>`
         SELECT
-          column_name,
-          data_type,
-          udt_name,
-          is_nullable,
-          column_default,
-          datetime_precision
+          column_name::text AS column_name,
+          data_type::text AS data_type,
+          udt_name::text AS udt_name,
+          is_nullable::text AS is_nullable,
+          column_default::text AS column_default,
+          datetime_precision::int AS datetime_precision
         FROM information_schema.columns
         WHERE table_schema = 'public'
           AND table_name = 'User'
         ORDER BY ordinal_position
       `;
 
-      const primaryKey = await prisma.$queryRaw<Array<{ columns: string[] }>>`
-        SELECT array_agg(a.attname ORDER BY x.ordinality) AS columns
+      const primaryKeyColumns = await prisma.$queryRaw<PrimaryKeyColumnRow[]>`
+        SELECT
+          a.attname::text AS column_name,
+          x.ordinality::int AS ordinal
         FROM pg_constraint c
         JOIN pg_class t ON t.oid = c.conrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -389,54 +396,67 @@ async function runAudit(): Promise<void> {
         WHERE n.nspname = 'public'
           AND t.relname = 'User'
           AND c.contype = 'p'
-        GROUP BY c.conname
+        ORDER BY x.ordinality
       `;
-      result.userPrimaryKey = primaryKey[0]?.columns ?? [];
+      result.userPrimaryKey = primaryKeyColumns.map(
+        (column) => column.column_name,
+      );
 
-      result.userUniqueIndexes = await prisma.$queryRaw<UniqueIndexInfo[]>`
+      const uniqueIndexColumns = await prisma.$queryRaw<UniqueIndexColumnRow[]>`
         SELECT
-          i.relname AS index_name,
-          array_agg(a.attname ORDER BY x.ordinality)
-            FILTER (WHERE a.attname IS NOT NULL) AS columns,
-          ix.indisprimary AS is_primary
+          i.relname::text AS index_name,
+          a.attname::text AS column_name,
+          x.ordinality::int AS ordinal,
+          ix.indisprimary::boolean AS is_primary
         FROM pg_index ix
         JOIN pg_class t ON t.oid = ix.indrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
         JOIN pg_class i ON i.oid = ix.indexrelid
-        LEFT JOIN unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ordinality) ON true
-        LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.attnum
+        JOIN unnest(ix.indkey) WITH ORDINALITY AS x(attnum, ordinality) ON true
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.attnum
         WHERE n.nspname = 'public'
           AND t.relname = 'User'
           AND ix.indisunique = true
-        GROUP BY i.relname, ix.indisprimary
-        ORDER BY i.relname
+          AND a.attname IS NOT NULL
+        ORDER BY i.relname, x.ordinality
       `;
+      const uniqueIndexesByName = new Map<string, UniqueIndexInfo>();
+      for (const row of uniqueIndexColumns) {
+        const index = uniqueIndexesByName.get(row.index_name) ?? {
+          index_name: row.index_name,
+          columns: [],
+          is_primary: row.is_primary,
+        };
+        index.columns.push(row.column_name);
+        uniqueIndexesByName.set(row.index_name, index);
+      }
+      result.userUniqueIndexes = [...uniqueIndexesByName.values()];
 
       const counts = await prisma.$queryRaw<
         Array<{
-          total_users: bigint;
-          null_email_count: bigint;
-          duplicate_email_group_count: bigint;
-          duplicate_non_null_firebase_uid_group_count: bigint;
+          total_users: number;
+          null_email_count: number;
+          duplicate_email_group_count: number;
+          duplicate_non_null_firebase_uid_group_count: number;
         }>
       >`
         SELECT
-          (SELECT count(*) FROM public."User") AS total_users,
-          (SELECT count(*) FROM public."User" WHERE email IS NULL) AS null_email_count,
+          (SELECT count(*)::int FROM public."User") AS total_users,
+          (SELECT count(*)::int FROM public."User" WHERE email IS NULL) AS null_email_count,
           (
-            SELECT count(*) FROM (
+            SELECT count(*)::int FROM (
               SELECT email FROM public."User" GROUP BY email HAVING count(*) > 1
             ) duplicate_email_groups
-          ) AS duplicate_email_group_count,
+          )::int AS duplicate_email_group_count,
           (
-            SELECT count(*) FROM (
+            SELECT count(*)::int FROM (
               SELECT "firebaseUid"
               FROM public."User"
               WHERE "firebaseUid" IS NOT NULL
               GROUP BY "firebaseUid"
               HAVING count(*) > 1
             ) duplicate_firebase_uid_groups
-          ) AS duplicate_non_null_firebase_uid_group_count
+          )::int AS duplicate_non_null_firebase_uid_group_count
       `;
 
       const aggregateChecks = counts[0];
@@ -453,7 +473,7 @@ async function runAudit(): Promise<void> {
     }
 
     const existingEnums = await prisma.$queryRaw<Array<{ typname: string }>>`
-      SELECT t.typname
+      SELECT t.typname::text AS typname
       FROM pg_type t
       JOIN pg_namespace n ON n.oid = t.typnamespace
       WHERE n.nspname = 'public'
@@ -473,7 +493,7 @@ async function runAudit(): Promise<void> {
     );
 
     const existingTables = await prisma.$queryRaw<Array<{ relname: string }>>`
-      SELECT c.relname
+      SELECT c.relname::text AS relname
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public'
@@ -501,7 +521,7 @@ async function runAudit(): Promise<void> {
     const userCompatibilityColumns = await prisma.$queryRaw<
       Array<{ column_name: string }>
     >`
-      SELECT column_name
+      SELECT column_name::text AS column_name
       FROM information_schema.columns
       WHERE table_schema = 'public'
         AND table_name = 'User'
@@ -516,13 +536,19 @@ async function runAudit(): Promise<void> {
     };
 
     const migrationTable = await prisma.$queryRaw<Array<{ exists: boolean }>>`
-      SELECT to_regclass('public."_prisma_migrations"') IS NOT NULL AS exists
+      SELECT (to_regclass('public."_prisma_migrations"') IS NOT NULL)::boolean AS exists
     `;
     result.migrationHistory.tableExists = migrationTable[0]?.exists === true;
 
     if (result.migrationHistory.tableExists) {
       const migrations = await prisma.$queryRaw<MigrationInfo[]>`
-        SELECT migration_name, finished_at, rolled_back_at, applied_steps_count
+        SELECT
+          migration_name::text AS migration_name,
+          CASE
+            WHEN rolled_back_at IS NOT NULL THEN 'ROLLED_BACK'
+            WHEN finished_at IS NOT NULL THEN 'APPLIED'
+            ELSE 'PENDING_OR_FAILED'
+          END::text AS status
         FROM public."_prisma_migrations"
         ORDER BY started_at ASC
       `;
