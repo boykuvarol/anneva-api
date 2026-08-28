@@ -259,6 +259,8 @@ function createUser(overrides: Partial<User> = {}): User {
     firebaseUid: null,
     email: 'user@example.com',
     name: null,
+    locale: 'tr',
+    onboardingCompleted: false,
     createdAt: now,
     updatedAt: now,
     ...overrides,

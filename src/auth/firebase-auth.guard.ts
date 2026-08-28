@@ -1,20 +1,23 @@
 import {
   CanActivate,
   ExecutionContext,
+  Inject,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
-import type { DecodedIdToken } from 'firebase-admin/auth';
-import { FirebaseService } from '../firebase/firebase.service';
+import { FIREBASE_SERVICE } from '../firebase/firebase.constants';
+import type { FirebaseService } from '../firebase/firebase.service';
+import type { FirebaseAuthenticatedRequest } from './types/firebase-authenticated-request';
 
-type FirebaseAuthenticatedRequest = Request & {
-  user?: DecodedIdToken;
-};
+type FirebaseTokenVerifier = Pick<FirebaseService, 'verifyIdToken'>;
 
 @Injectable()
 export class FirebaseAuthGuard implements CanActivate {
-  constructor(private readonly firebaseService: FirebaseService) {}
+  constructor(
+    @Inject(FIREBASE_SERVICE)
+    private readonly firebaseService: FirebaseTokenVerifier,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context

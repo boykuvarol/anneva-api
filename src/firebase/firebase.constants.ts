@@ -1,0 +1,1 @@
+export const FIREBASE_SERVICE = Symbol('FIREBASE_SERVICE');

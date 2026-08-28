@@ -6,11 +6,261 @@ datasource db {
   provider = "postgresql"
 }
 
+enum DatingMethod {
+  lmp
+  doctorDueDate
+}
+
+enum PregnancyStatus {
+  active
+  completed
+  loss
+  terminated
+}
+
+enum AppointmentStatus {
+  scheduled
+  completed
+  cancelled
+}
+
+enum InsightType {
+  hydration
+  vitamin
+  mood
+  symptom
+  appointment
+  preparation
+  general
+}
+
+enum PreparationCategory {
+  hospitalBag
+  shopping
+  documents
+  birthPlan
+  homePreparation
+}
+
 model User {
+  id                  String   @id @default(cuid())
+  firebaseUid         String?  @unique
+  email               String   @unique
+  name                String?
+  locale              String   @default("tr")
+  onboardingCompleted Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  pregnancies         Pregnancy[]
+  trackingEntries     TrackingEntry[]
+  appointments        Appointment[]
+  preparationItems    UserPreparationItem[]
+  exerciseCompletions ExerciseCompletion[]
+  insights            Insight[]
+  birthPlans          BirthPlan[]
+}
+
+/// One active pregnancy per user is enforced by raw SQL migration
+/// 20260828002000_one_active_pregnancy_per_user via partial unique index
+/// "Pregnancy_one_active_per_user_key". Prisma schema cannot represent
+/// PostgreSQL partial indexes directly.
+model Pregnancy {
+  id                  String          @id @default(cuid())
+  userId              String
+  datingMethod        DatingMethod
+  lastMenstrualPeriod DateTime?
+  cycleLength         Int             @default(28)
+  doctorDueDate       DateTime?
+  status              PregnancyStatus @default(active)
+  startedAt           DateTime        @default(now())
+  endedAt             DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  user                User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trackingEntries     TrackingEntry[]
+  appointments        Appointment[]
+  preparationItems    UserPreparationItem[]
+  exerciseCompletions ExerciseCompletion[]
+  insights            Insight[]
+  birthPlan           BirthPlan?
+
+  @@index([userId, status])
+}
+
+model TrackingEntry {
+  id            String   @id @default(cuid())
+  userId        String
+  pregnancyId   String
+  date          DateTime
+  mood          String?
+  symptoms      String[]
+  waterMl       Int      @default(0)
+  waterTargetMl Int      @default(2500)
+  vitaminsTaken Boolean  @default(false)
+  weightKg      Decimal? @db.Decimal(5, 2)
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pregnancy Pregnancy @relation(fields: [pregnancyId], references: [id], onDelete: Cascade)
+
+  @@unique([pregnancyId, date])
+  @@index([userId])
+  @@index([pregnancyId, date])
+}
+
+model Appointment {
+  id                    String            @id @default(cuid())
+  userId                String
+  pregnancyId           String
+  doctorName            String?
+  clinicName            String?
+  type                  String?
+  title                 String
+  notes                 String?
+  startsAt              DateTime
+  reminderMinutesBefore Int?
+  status                AppointmentStatus @default(scheduled)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pregnancy Pregnancy @relation(fields: [pregnancyId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([pregnancyId, startsAt])
+}
+
+model PregnancyWeekContent {
+  id                     String   @id @default(cuid())
+  week                   Int
+  locale                 String
+  title                  String
+  summary                String
+  babyDevelopment        String
+  motherChanges          String
+  nutrition              String
+  weeklyFocus            String
+  approximateLengthMm    Int?
+  approximateWeightGrams Int?
+  sizeComparisonKey      String?
+  cautionNote            String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([week, locale])
+  @@index([week])
+}
+
+model PreparationTemplateItem {
+  id          String              @id @default(cuid())
+  category    PreparationCategory
+  locale      String
+  title       String
+  description String?
+  sortOrder   Int
+  isDefault   Boolean             @default(true)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  userItems UserPreparationItem[]
+
+  @@index([category, locale])
+}
+
+model UserPreparationItem {
+  id             String              @id @default(cuid())
+  userId         String
+  pregnancyId    String
+  templateItemId String?
+  category       PreparationCategory
+  title          String
+  description    String?
+  completed      Boolean             @default(false)
+  isCustom       Boolean             @default(false)
+  sortOrder      Int                 @default(0)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  user         User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pregnancy    Pregnancy                @relation(fields: [pregnancyId], references: [id], onDelete: Cascade)
+  templateItem PreparationTemplateItem? @relation(fields: [templateItemId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([pregnancyId, category])
+}
+
+model BirthPlan {
   id          String   @id @default(cuid())
-  firebaseUid String?  @unique
-  email       String   @unique
-  name        String?
+  userId      String
+  pregnancyId String   @unique
+  preferences Json
+  notes       String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pregnancy Pregnancy @relation(fields: [pregnancyId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model BreathingExercise {
+  id              String   @id @default(cuid())
+  slug            String
+  locale          String
+  title           String
+  description     String
+  durationSeconds Int
+  inhaleSeconds   Int
+  holdSeconds     Int
+  exhaleSeconds   Int
+  cycles          Int
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  completions ExerciseCompletion[]
+
+  @@unique([slug, locale])
+  @@index([locale, isActive])
+}
+
+model ExerciseCompletion {
+  id          String   @id @default(cuid())
+  userId      String
+  pregnancyId String
+  exerciseId  String
+  completedAt DateTime @default(now())
+
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pregnancy Pregnancy         @relation(fields: [pregnancyId], references: [id], onDelete: Cascade)
+  exercise  BreathingExercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([pregnancyId, completedAt])
+  @@index([exerciseId])
+}
+
+model Insight {
+  id          String      @id @default(cuid())
+  userId      String
+  pregnancyId String
+  type        InsightType
+  title       String
+  message     String
+  detail      String?
+  isRead      Boolean     @default(false)
+  generatedAt DateTime    @default(now())
+  expiresAt   DateTime?
+  metadata    Json?
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pregnancy Pregnancy @relation(fields: [pregnancyId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([pregnancyId, generatedAt])
 }
